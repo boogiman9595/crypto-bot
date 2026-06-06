@@ -2,15 +2,15 @@
 # ║  main.py  —  Master Async Engine v8.0                        ║
 # ║                                                              ║
 # ║  FIXES vs v7.0:                                              ║
-# ║  • run_pre_entry_checks() NOW WIRED IN (was imported but    ║
+# ║  • run_pre_entry_checks() NOW WIRED IN (was imported but     ║
 # ║    never called — huge missed filter)                        ║
-# ║  • sl_optimizer + recalculate_tps_for_sl NOW WIRED IN       ║
-# ║  • volatility_engine integrated — regime-aware TP/SL/size   ║
+# ║  • sl_optimizer + recalculate_tps_for_sl NOW WIRED IN        ║
+# ║  • volatility_engine integrated — regime-aware TP/SL/size    ║
 # ║  • Per-symbol dynamic signal cooldown (high-vol coins reset  ║
-# ║    faster than low-vol ones)                                  ║
+# ║    faster than low-vol ones)                                 ║
 # ║  • Daily quality metrics logged (blocks vs trades ratio)     ║
 # ╚══════════════════════════════════════════════════════════════╝
-
+from keep_alive import start_keep_alive
 import time
 import asyncio
 import concurrent.futures
@@ -18,16 +18,16 @@ from datetime import datetime, timezone
 
 import config
 from strategy        import (get_data, simple_signal, exchange,
-                              get_live_price, _is_valid)
+                             get_live_price, _is_valid)
 from paper_engine    import (create_trade, check_trade, can_trade,
-                              open_trades, get_report, psychology_status)
+                             open_trades, get_report, psychology_status)
 from news_filter     import check_news, get_fear_greed_label
 from telegram_sender import (send, startup_message, signal_message,
-                              trade_closed_message, tp_update_message,
-                              news_paused_message, news_caution_message,
-                              news_resumed_message,
-                              psychology_message, daily_summary_message,
-                              off_session_message)
+                             trade_closed_message, tp_update_message,
+                             news_paused_message, news_caution_message,
+                             news_resumed_message,
+                             psychology_message, daily_summary_message,
+                             off_session_message)
 from realtime_price  import start_socket, get_price
 from trade_filter    import run_pre_entry_checks
 from sl_optimizer    import optimized_sl, recalculate_tps_for_sl
@@ -225,7 +225,6 @@ async def process_single_coin_pipeline(coin, news_status, sentiment, session, sq
     final_execution_price = await execute_fee_aware_limit_chaser(coin, sig["signal"], price)
 
     # ── 7. SL OPTIMIZER (WAS MISSING — NOW WIRED IN)
-    # Replace blind ATR SL with structure-aware SL beyond swing high/low
     optimized_sl_price, sl_method = optimized_sl(
         action      = sig["signal"],
         entry       = final_execution_price,
@@ -266,22 +265,18 @@ async def process_single_coin_pipeline(coin, news_status, sentiment, session, sq
     sig["sl"]  = adj_sl
 
     # ── 9. CONFIDENCE CALCULATION
-    # Chain: news × htf × volatility_regime × quality_boost
     news_mult    = news_status.get("confidence_multiplier", 1.0)
     vol_conf_mult = vol_regime.get("confidence_mult", 1.0)
     modified_confidence = int(float(sig["confidence"]) * news_mult * htf_mult * vol_conf_mult)
     if quality_score >= 75:
         modified_confidence = min(95, modified_confidence + 5)
-    # ADX strength bonus: ADX > 35 = strong trend, +3 confidence
     if sig.get("adx", 0) > 35:
         modified_confidence = min(95, modified_confidence + 3)
-    # RSI divergence bonus: +5 if divergence aligns with signal
     if sig.get("rsi_divergence") == "BULL_DIV" and sig["signal"] == "BUY":
         modified_confidence = min(95, modified_confidence + 5)
     if sig.get("rsi_divergence") == "BEAR_DIV" and sig["signal"] == "SELL":
         modified_confidence = min(95, modified_confidence + 5)
 
-    # Final hard floor: don't take very low confidence trades even if all gates pass
     if modified_confidence < 55:
         print(f"[conf-block] {coin}: final confidence {modified_confidence}% too low after all adjustments")
         return
@@ -311,7 +306,6 @@ async def process_single_coin_pipeline(coin, news_status, sentiment, session, sq
     trade_safe = trade.copy()
     trade_safe["confidence"] = int(float(trade_safe["confidence"]))
 
-    # Enrich sig with volatility regime label for Telegram
     sig["vol_regime_label"] = format_regime_line(vol_regime)
     sig["sl_method"]        = sl_method
 
@@ -364,7 +358,6 @@ async def async_main_loop():
                 fg_label = get_fear_greed_label()
                 report   = get_report()
                 daily_summary_message(report, sentiment=fg_label)
-                # Log daily filter stats
                 total_scans = _daily_stats["scanned"] or 1
                 trade_rate  = _daily_stats["traded"] / total_scans * 100
                 print(
@@ -433,4 +426,9 @@ async def async_main_loop():
             await asyncio.sleep(10)
 
 if __name__ == "__main__":
+    # 1. Spin up the Render port web listener thread first
+    start_keep_alive()
+    print("[Render] Web service dummy binder active.")
+    
+    # 2. Run your infinite async trading loop engine
     asyncio.run(async_main_loop())
